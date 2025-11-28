@@ -19,7 +19,7 @@ RUN ./gradlew downloadRepos
 
 # Copy source files (adapted for standalone repo - files are at root level)
 COPY ./src ./src
-# Copy proto file if it exists in proto/ directory
+# Copy proto file (must exist, otherwise build will fail)
 COPY ./proto ./proto
 
 RUN chmod +x ./gradlew
