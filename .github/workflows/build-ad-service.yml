@@ -1,0 +1,193 @@
+name: Build and Push AD Service
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: opentelemetry-demo/ad-service
+  AWS_ACCOUNT_ID: 339712749745
+  IMAGE_TAG: 2.1.3-ad
+
+jobs:
+  build-and-push:
+    name: Build Docker Image and Push to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::339712749745:role/retail-store-aiden
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create ECR repository if it doesn't exist
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability MUTABLE
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Output image details
+        run: |
+          echo "✅ Successfully built and pushed image"
+          echo "Repository: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "Image URIs:"
+          echo "  Version: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          echo "  Latest: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+      
+      - name: Checkout Helm chart repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v4
+        with:
+          repository: appcd-dev/otel-microservices-demo
+          token: ${{ secrets.OTEL_DEMO_PAT }}
+          path: helm-repo
+          ref: main
+          
+      - name: Update image tag in values.yaml and create PR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: helm-repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.OTEL_DEMO_PAT }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          VALUES_FILE="demo-apps/ad-service/values.yaml"
+          ECR_REPO="339712749745.dkr.ecr.us-east-1.amazonaws.com/opentelemetry-demo/ad-service"
+          BRANCH_NAME="update/ad-service-${{ env.IMAGE_TAG }}"
+          PR_TITLE="chore: update ad-service image tag to ${{ env.IMAGE_TAG }}"
+          
+          # Ensure we're on main and up to date
+          git checkout main || git checkout -b main
+          git fetch origin main
+          git reset --hard origin/main
+          
+          # Fetch all remote branches
+          git fetch origin
+          
+          # Check if branch exists on remote
+          if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+            echo "Branch $BRANCH_NAME exists on remote, will update it"
+            # Delete local branch if it exists
+            if git show-ref --verify --quiet refs/heads/"$BRANCH_NAME"; then
+              git branch -D "$BRANCH_NAME"
+            fi
+            # Checkout the remote branch
+            git checkout -b "$BRANCH_NAME" origin/"$BRANCH_NAME"
+            # Reset to main to start fresh (we'll make new changes)
+            git reset --hard origin/main
+          else
+            echo "Creating new branch $BRANCH_NAME"
+            # Delete local branch if it exists
+            if git show-ref --verify --quiet refs/heads/"$BRANCH_NAME"; then
+              git branch -D "$BRANCH_NAME"
+            fi
+            # Create new branch from main
+            git checkout -b "$BRANCH_NAME"
+          fi
+          
+          # Verify we're on the branch (not main)
+          CURRENT_BRANCH=$(git branch --show-current)
+          echo "Current branch: $CURRENT_BRANCH"
+          if [ "$CURRENT_BRANCH" = "main" ]; then
+            echo "ERROR: Still on main branch! Aborting."
+            exit 1
+          fi
+          
+          # Update the repository in values.yaml
+          sed -i.bak "s|repository:.*|repository: ${ECR_REPO}|g" "$VALUES_FILE"
+          
+          # Update the tag in values.yaml
+          sed -i.bak "s|tag: \".*\"|tag: \"${{ env.IMAGE_TAG }}\"|g" "$VALUES_FILE"
+          
+          # Also ensure pullPolicy is Always
+          sed -i.bak "s|pullPolicy:.*|pullPolicy: Always|g" "$VALUES_FILE"
+          
+          # Show the change
+          echo "Updated values.yaml:"
+          git diff "$VALUES_FILE" || true
+          
+          # Commit and push if there are changes
+          if git diff --quiet "$VALUES_FILE"; then
+            echo "No changes to commit"
+          else
+            git add "$VALUES_FILE"
+            git commit -m "$PR_TITLE"
+            
+            # Explicitly push to the branch (not main)
+            echo "Pushing to branch: $BRANCH_NAME"
+            # Use --force-with-lease to safely overwrite remote branch
+            # This is safe because we just reset to main, so we know our changes are correct
+            git push origin "$BRANCH_NAME" --force-with-lease || {
+              echo "Force-with-lease failed, trying regular push after fetch"
+              git fetch origin "$BRANCH_NAME" || true
+              git push origin "$BRANCH_NAME" --force-with-lease
+            }
+            
+            # Create PR using GitHub CLI
+            gh pr create \
+              --title "$PR_TITLE" \
+              --body "Automated update: Update ad-service image tag to ${{ env.IMAGE_TAG }}
+              
+              - Repository: ${ECR_REPO}
+              - Tag: ${{ env.IMAGE_TAG }}
+              - Pull Policy: Always
+              
+              This PR was automatically created by the ad-service build workflow." \
+              --base main \
+              --head "$BRANCH_NAME" \
+              --repo appcd-dev/otel-microservices-demo || echo "PR may already exist"
+            
+            echo "✅ Created PR for image tag update: ${{ env.IMAGE_TAG }}"
+          fi
+
