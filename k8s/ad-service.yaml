@@ -1,0 +1,71 @@
+# ad-service in aiden-demo (gRPC + OpenTelemetry Java agent → shared datadog-agent).
+# Prerequisite: order-service stack applied (namespace + datadog-agent + secret).
+# Enable OTLP on the agent once: kubectl -n aiden-demo set env deployment/datadog-agent DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT=0.0.0.0:4317
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ad-service
+  namespace: aiden-demo
+  labels:
+    app: ad-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ad-service
+  template:
+    metadata:
+      labels:
+        app: ad-service
+      annotations:
+        ad.datadoghq.com/ad-service.logs: '[{"source":"java","service":"ad-service","tags":["env:demo"]}]'
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: aiden-demo
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: ad-service
+          image: ghcr.io/stackgen-demo/ad-service:latest
+          imagePullPolicy: Always
+          ports:
+            - name: grpc
+              containerPort: 8080
+          env:
+            - name: AD_PORT
+              value: "8080"
+            - name: OTEL_SERVICE_NAME
+              value: ad-service
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: deployment.environment=demo
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://datadog-agent:4317
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ad-service
+  namespace: aiden-demo
+spec:
+  selector:
+    app: ad-service
+  ports:
+    - name: grpc
+      port: 8080
+      targetPort: grpc

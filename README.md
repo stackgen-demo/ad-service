@@ -1,41 +1,60 @@
 # Ad Service
 
-The Ad service provides advertisement based on context keys. If no context keys
-are provided then it returns random ads.
+gRPC ad service for the **aiden-demo** namespace on EKS. Ships OTLP traces and logs via the OpenTelemetry Java agent to the shared Datadog agent (US3), same pattern as [order-service](https://github.com/stackgen-demo/order-service).
 
-## Building Locally
+Service name in Datadog: **`ad-service`**
 
-The Ad service requires at least JDK 21 to build and uses gradlew to
-compile/install/distribute. Gradle wrapper is already part of the source code.
-To build Ad Service, run:
+The Ad service provides advertisement based on context keys. If no context keys are provided then it returns random ads.
 
-```sh
-./gradlew installDist
-```
+## Local run
 
-It will create an executable script
-`src/ad/build/install/oteldemo/bin/Ad`.
+Requires JDK 21+:
 
-To run the Ad Service:
-
-```sh
+```bash
+./gradlew installDist -PprotoSourceDir=./pb
 export AD_PORT=8080
-export FEATURE_FLAG_GRPC_SERVICE_ADDR=featureflagservice:50053
 ./build/install/opentelemetry-demo-ad/bin/Ad
 ```
 
-### Upgrading Gradle
+## Container image (GHCR)
 
-If you need to upgrade the version of gradle then run
+Push to `initial-setup` or `main` runs [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
 
-```sh
-./gradlew wrapper --gradle-version <new-version>
+`ghcr.io/stackgen-demo/ad-service:latest`
+
+Make the GHCR package **public** after the first CI run (Packages → ad-service → Change visibility).
+
+## Deploy to aiden-demo
+
+**Prerequisites:** [order-service](https://github.com/stackgen-demo/order-service) stack applied, `datadog-secret` present, and OTLP enabled on the agent:
+
+```bash
+kubectl -n aiden-demo set env deployment/datadog-agent \
+  DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT=0.0.0.0:4317
 ```
 
-## Building Docker
+```bash
+# After CI publishes the image (or local build):
+PUSH=true ./scripts/deploy-aiden-demo.sh
+# Or apply manifests only:
+./scripts/deploy-aiden-demo.sh
+```
 
-From the root of `opentelemetry-demo`, run:
+## Datadog
 
-```sh
-docker build --file ./src/ad/Dockerfile ./
+- APM: `service:ad-service env:demo`
+- gRPC port **8080** (`ad-service.aiden-demo.svc:8080`)
+
+## Docker build (local)
+
+```bash
+docker build -t ad-service:local .
+```
+
+Protobuf definitions live in [`pb/demo.proto`](pb/demo.proto) (vendored from the OpenTelemetry Astronomy Shop demo).
+
+## Upgrading Gradle
+
+```bash
+./gradlew wrapper --gradle-version <new-version>
 ```
