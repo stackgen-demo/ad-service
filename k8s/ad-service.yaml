@@ -58,9 +58,11 @@ spec:
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: deployment.environment=demo
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://datadog-agent:4317
+              value: http://datadog-agent:4318
             - name: OTEL_EXPORTER_OTLP_INSECURE
               value: "true"
+            - name: OTEL_LOGS_EXPORTER
+              value: none
             - name: AD_DEMO_FAULT
               value: ""
             - name: AD_FAILURE_FRACTION
