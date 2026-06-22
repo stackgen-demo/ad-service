@@ -168,8 +168,17 @@ public final class AdService {
           logger.info("no baggage found in context");
         }
 
+        // Env-driven demo faults (preferred for aiden-demo over flagd defaults).
+        if (shouldInjectAdFailure()) {
+          throw new StatusRuntimeException(Status.UNAVAILABLE.withDescription("AdServiceUnavailable"));
+        }
+
         CPULoad cpuload = CPULoad.getInstance();
-        cpuload.execute(ffClient.getBooleanValue(AD_HIGH_CPU_FEATURE_FLAG, false, evaluationContext));
+        if (shouldRunHighCpu()) {
+          cpuload.execute(true);
+        } else {
+          cpuload.execute(ffClient.getBooleanValue(AD_HIGH_CPU_FEATURE_FLAG, false, evaluationContext));
+        }
 
         span.setAttribute("app.ads.contextKeys", req.getContextKeysList().toString());
         span.setAttribute("app.ads.contextKeys.count", req.getContextKeysCount());
@@ -201,12 +210,16 @@ public final class AdService {
             Attributes.of(
                 adRequestTypeKey, adRequestType.name(), adResponseTypeKey, adResponseType.name()));
 
-        // Throw 1/10 of the time to simulate a failure when the feature flag is enabled
+        // Throw when feature flag or env fraction triggers failure
         if (ffClient.getBooleanValue(AD_FAILURE, false, evaluationContext) && random.nextInt(10) == 0) {
           throw new StatusRuntimeException(Status.UNAVAILABLE);
         }
 
-        if (ffClient.getBooleanValue(AD_MANUAL_GC_FEATURE_FLAG, false, evaluationContext)) {
+        if (shouldRunManualGc()) {
+          logger.warn("AD_DEMO_FAULT=manual_gc enabled, performing a manual gc now");
+          GarbageCollectionTrigger gct = new GarbageCollectionTrigger();
+          gct.doExecute();
+        } else if (ffClient.getBooleanValue(AD_MANUAL_GC_FEATURE_FLAG, false, evaluationContext)) {
           logger.warn("Feature Flag " + AD_MANUAL_GC_FEATURE_FLAG + " enabled, performing a manual gc now");
           GarbageCollectionTrigger gct = new GarbageCollectionTrigger();
           gct.doExecute();
@@ -220,6 +233,7 @@ public final class AdService {
             "Error", Attributes.of(AttributeKey.stringKey("exception.message"), e.getMessage()));
         span.setStatus(StatusCode.ERROR);
         logger.log(Level.WARN, "GetAds Failed with status {}", e.getStatus());
+        logger.warn("GetAds failed error.kind=AdServiceUnavailable status={}", e.getStatus());
         responseObserver.onError(e);
       }
     }
@@ -261,6 +275,44 @@ public final class AdService {
 
   private static AdService getInstance() {
     return service;
+  }
+
+  private static boolean shouldInjectAdFailure() {
+    String mode = Optional.ofNullable(System.getenv("AD_DEMO_FAULT")).orElse("").trim().toLowerCase();
+    if ("unavailable".equals(mode)) {
+      return true;
+    }
+    double fraction = parseFraction(System.getenv("AD_FAILURE_FRACTION"));
+    if (fraction <= 0) {
+      return false;
+    }
+    return random.nextDouble() < fraction;
+  }
+
+  private static boolean shouldRunHighCpu() {
+    return "high_cpu".equals(Optional.ofNullable(System.getenv("AD_DEMO_FAULT")).orElse("").trim().toLowerCase());
+  }
+
+  private static boolean shouldRunManualGc() {
+    return "manual_gc".equals(Optional.ofNullable(System.getenv("AD_DEMO_FAULT")).orElse("").trim().toLowerCase());
+  }
+
+  private static double parseFraction(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return 0;
+    }
+    try {
+      double value = Double.parseDouble(raw.trim());
+      if (value < 0) {
+        return 0;
+      }
+      if (value > 1) {
+        return 1;
+      }
+      return value;
+    } catch (NumberFormatException ex) {
+      return 0;
+    }
   }
 
   /** Await termination on the main thread since the grpc library uses daemon threads. */
